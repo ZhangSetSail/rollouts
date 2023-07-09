@@ -59,14 +59,14 @@ func (r *gatewayController) Initialize(ctx context.Context) error {
 func (r *gatewayController) EnsureRoutes(ctx context.Context, strategy *rolloutv1alpha1.TrafficRoutingStrategy) (bool, error) {
 	weight := strategy.Weight
 	matches := strategy.Matches
-	// headerModifier := strategy.RequestHeaderModifier
+	headerModifier := strategy.RequestHeaderModifier
 	var httpRoute gatewayv1alpha2.HTTPRoute
 	err := r.Get(ctx, types.NamespacedName{Namespace: r.conf.Namespace, Name: *r.conf.TrafficConf.HTTPRouteName}, &httpRoute)
 	if err != nil {
 		return false, err
 	}
 	// desired route
-	desiredRule := r.buildDesiredHTTPRoute(httpRoute.Spec.Rules, weight, matches, nil)
+	desiredRule := r.buildDesiredHTTPRoute(httpRoute.Spec.Rules, weight, matches, headerModifier, nil)
 	if reflect.DeepEqual(httpRoute.Spec.Rules, desiredRule) {
 		return true, nil
 	}
@@ -98,7 +98,7 @@ func (r *gatewayController) Finalise(ctx context.Context) error {
 		return err
 	}
 	// desired rule
-	desiredRule := r.buildDesiredHTTPRoute(httpRoute.Spec.Rules, utilpointer.Int32(-1), nil, nil)
+	desiredRule := r.buildDesiredHTTPRoute(httpRoute.Spec.Rules, utilpointer.Int32(-1), nil, nil, nil)
 	if reflect.DeepEqual(httpRoute.Spec.Rules, desiredRule) {
 		return nil
 	}
@@ -119,7 +119,7 @@ func (r *gatewayController) Finalise(ctx context.Context) error {
 }
 
 func (r *gatewayController) buildDesiredHTTPRoute(rules []gatewayv1alpha2.HTTPRouteRule, weight *int32, matches []rolloutv1alpha1.HttpRouteMatch,
-	rh *gatewayv1alpha2.HTTPRequestHeaderFilter) []gatewayv1alpha2.HTTPRouteRule {
+	requestHeaderFilter *gatewayv1alpha2.HTTPRequestHeaderFilter, rh *gatewayv1alpha2.HTTPRequestHeaderFilter) []gatewayv1alpha2.HTTPRouteRule {
 	var desired []gatewayv1alpha2.HTTPRouteRule
 	// Only when finalize method parameter weight=-1,
 	// then we need to remove the canary route policy and restore to the original configuration
@@ -139,14 +139,14 @@ func (r *gatewayController) buildDesiredHTTPRoute(rules []gatewayv1alpha2.HTTPRo
 		return desired
 		// according to the Gateway API definition, weight and headers cannot be supported at the same time.
 		// A/B Testing, according to headers. current only support one match
-	} else if len(matches) > 0 {
-		return r.buildCanaryHeaderHttpRoutes(rules, matches)
+	} else if len(matches) > 0 || requestHeaderFilter != nil {
+		return r.buildCanaryHttpRoutes(rules, matches, requestHeaderFilter)
 	}
 	// canary release, according to percentage of traffic routing
 	return r.buildCanaryWeightHttpRoutes(rules, weight)
 }
 
-func (r *gatewayController) buildCanaryHeaderHttpRoutes(rules []gatewayv1alpha2.HTTPRouteRule, matchs []rolloutv1alpha1.HttpRouteMatch) []gatewayv1alpha2.HTTPRouteRule {
+func (r *gatewayController) buildCanaryHttpRoutes(rules []gatewayv1alpha2.HTTPRouteRule, matchs []rolloutv1alpha1.HttpRouteMatch, requestHeaderFilter *gatewayv1alpha2.HTTPRequestHeaderFilter) []gatewayv1alpha2.HTTPRouteRule {
 	var desired []gatewayv1alpha2.HTTPRouteRule
 	var canarys []gatewayv1alpha2.HTTPRouteRule
 	for i := range rules {
@@ -165,6 +165,7 @@ func (r *gatewayController) buildCanaryHeaderHttpRoutes(rules []gatewayv1alpha2.
 		canaryRule.BackendRefs = []gatewayv1alpha2.HTTPBackendRef{*canaryRef}
 		// set canary headers in httpRoute
 		var newMatches []gatewayv1alpha2.HTTPRouteMatch
+		var newFilters []gatewayv1alpha2.HTTPRouteFilter
 		for j := range canaryRule.Matches {
 			canaryRuleMatch := &canaryRule.Matches[j]
 			for k := range matchs {
@@ -173,7 +174,30 @@ func (r *gatewayController) buildCanaryHeaderHttpRoutes(rules []gatewayv1alpha2.
 				newMatches = append(newMatches, canaryRuleMatchBase)
 			}
 		}
+		// set canary headerModifier in httpRoute
+		if canaryRule.Filters != nil && requestHeaderFilter != nil {
+			for o := range canaryRule.Filters {
+				canaryRuleFilters := canaryRule.Filters[o]
+				if canaryRuleFilters.RequestHeaderModifier != nil {
+					var set, add []gatewayv1alpha2.HTTPHeader
+					var remove []string
+					set = canaryRuleFilters.RequestHeaderModifier.Set
+					add = canaryRuleFilters.RequestHeaderModifier.Add
+					remove = canaryRuleFilters.RequestHeaderModifier.Remove
+					canaryRuleFilters.RequestHeaderModifier.Add = append(add, requestHeaderFilter.Add...)
+					canaryRuleFilters.RequestHeaderModifier.Remove = append(remove, requestHeaderFilter.Remove...)
+					canaryRuleFilters.RequestHeaderModifier.Set = append(set, requestHeaderFilter.Set...)
+					newFilters = append(newFilters, canaryRuleFilters)
+				} else {
+					canaryRuleFilters.RequestHeaderModifier = requestHeaderFilter
+					newFilters = append(newFilters, canaryRuleFilters)
+				}
+			}
+		} else if requestHeaderFilter != nil {
+			newFilters = []gatewayv1alpha2.HTTPRouteFilter{{RequestHeaderModifier: requestHeaderFilter}}
+		}
 		canaryRule.Matches = newMatches
+		canaryRule.Filters = newFilters
 		canarys = append(canarys, *canaryRule)
 	}
 	desired = append(desired, canarys...)

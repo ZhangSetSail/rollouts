@@ -99,7 +99,7 @@ func (m *Manager) DoTrafficRouting(c *TrafficRoutingContext) (bool, error) {
 	if trafficRouting.GracePeriodSeconds <= 0 {
 		trafficRouting.GracePeriodSeconds = defaultGracePeriodSeconds
 	}
-	if c.Strategy.Weight == nil && len(c.Strategy.Matches) == 0 {
+	if c.Strategy.Weight == nil && len(c.Strategy.Matches) == 0 && c.Strategy.RequestHeaderModifier == nil {
 		return true, nil
 	}
 
